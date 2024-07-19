@@ -10,10 +10,10 @@ spec:
     name: backend
   wasm:
     - name: wasm-filter
-      rootID: my_root_id
+      rootID: root_id
       code:
         type: HTTP
         http:
-          url: https://raw.githubusercontent.com/akhenakh/envoy/main/wasm/plugin.wasm
-          sha256: 79c9f85128bb0177b6511afa85d587224efded376ac0ef76df56595f1e6315c0
+          url: https://raw.githubusercontent.com/akhenakh/wasm-filter-go/main/build/plugin.wasm
+          sha256: 8ac73efb3ee6808ac92aa47f4f9c897e7a547003b2b18d56404f5239dcc2542b
 
