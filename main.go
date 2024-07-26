@@ -1,12 +1,13 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm"
 	"github.com/tetratelabs/proxy-wasm-go-sdk/proxywasm/types"
+	"github.com/tidwall/gjson"
 	_ "github.com/wasilibs/nottinygc"
 )
-
-const tickMilliseconds uint32 = 15000
 
 var authHeader string
 
@@ -30,54 +31,98 @@ type pluginContext struct {
 	// so that we don't need to reimplement all the methods.
 	types.DefaultPluginContext
 	contextID uint32
-	callBack  func(numHeaders, bodySize, numTrailers int)
+
+	// headerName is the header to be added to response. It is configured via
+	// plugin configuration during OnPluginStart.
+	headerName string
 }
 
 // Override types.DefaultPluginContext.
-func (*pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
-	return &httpAuthRandom{contextID: contextID}
+func (p *pluginContext) NewHttpContext(contextID uint32) types.HttpContext {
+	return &httpHeaders{
+		contextID:  contextID,
+		headerName: p.headerName,
+	}
 }
 
-type httpAuthRandom struct {
+type httpHeaders struct {
 	// Embed the default http context here,
 	// so that we don't need to reimplement all the methods.
 	types.DefaultHttpContext
-	contextID uint32
+	contextID  uint32
+	headerName string
 }
 
 // Override types.DefaultPluginContext.
-func (ctx *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
-	if err := proxywasm.SetTickPeriodMilliSeconds(tickMilliseconds); err != nil {
-		proxywasm.LogCriticalf("failed to set tick period: %v", err)
+func (p *pluginContext) OnPluginStart(pluginConfigurationSize int) types.OnPluginStartStatus {
+	proxywasm.LogDebug("loading plugin config")
+	data, err := proxywasm.GetPluginConfiguration()
+	if data == nil {
+		return types.OnPluginStartStatusOK
+	}
+
+	if err != nil {
+		proxywasm.LogCriticalf("error reading plugin configuration: %v", err)
 		return types.OnPluginStartStatusFailed
 	}
-	proxywasm.LogInfof("set tick period milliseconds: %d", tickMilliseconds)
-	ctx.callBack = func(numHeaders, bodySize, numTrailers int) {
-		respHeaders, _ := proxywasm.GetHttpCallResponseHeaders()
-		proxywasm.LogInfof("respHeaders: %v", respHeaders)
 
-		for _, headerPairs := range respHeaders {
-			if headerPairs[0] == "authorization" {
-				authHeader = headerPairs[1]
-			}
-		}
+	if !gjson.Valid(string(data)) {
+		proxywasm.LogCritical(`invalid configuration format; expected {"header": "<header name>"}`)
+		return types.OnPluginStartStatusFailed
 	}
+
+	p.headerName = strings.TrimSpace(gjson.Get(string(data), "header").Str)
+
+	if p.headerName == "" {
+		proxywasm.LogCritical(`invalid configuration format; expected {"header": "<header name>"}`)
+		return types.OnPluginStartStatusFailed
+	}
+
+	proxywasm.LogInfof("header from config: %s", p.headerName)
+
 	return types.OnPluginStartStatusOK
 }
 
-func (ctx *httpAuthRandom) OnHttpResponseHeaders(int, bool) types.Action {
-	proxywasm.AddHttpResponseHeader("x-wasm-filter", "hello from wasm")
-	proxywasm.AddHttpResponseHeader("x-auth", authHeader)
+// OnHttpRequestHeaders implements types.HttpContext.
+func (ctx *httpHeaders) OnHttpRequestHeaders(numHeaders int, endOfStream bool) types.Action {
+	err := proxywasm.ReplaceHttpRequestHeader("test", "best")
+	if err != nil {
+		proxywasm.LogCritical("failed to set request header: test")
+	}
 
+	hs, err := proxywasm.GetHttpRequestHeaders()
+	if err != nil {
+		proxywasm.LogCriticalf("failed to get request headers: %v", err)
+	}
+
+	for _, h := range hs {
+		proxywasm.LogInfof("request header --> %s: %s", h[0], h[1])
+	}
 	return types.ActionContinue
 }
 
-// Override types.DefaultPluginContext.
-func (ctx *pluginContext) OnTick() {
-	hs := [][2]string{
-		{":method", "GET"}, {":authority", "some_authority"}, {":path", "/auth"}, {"accept", "*/*"},
+func (ctx *httpHeaders) OnHttpResponseHeaders(int, bool) types.Action {
+	// Add a hardcoded header
+	if err := proxywasm.AddHttpResponseHeader("x-proxy-wasm-go", "true"); err != nil {
+		proxywasm.LogCriticalf("failed to set response constant header: %v", err)
 	}
-	if _, err := proxywasm.DispatchHttpCall("my_custom_svc", hs, nil, nil, 5000, ctx.callBack); err != nil {
-		proxywasm.LogCriticalf("dispatch httpcall failed: %v", err)
+
+	// Add the header passed by arguments
+	if ctx.headerName != "" {
+		if err := proxywasm.AddHttpResponseHeader(ctx.headerName, ctx.headerValue); err != nil {
+			proxywasm.LogCriticalf("failed to set response headers: %v", err)
+		}
 	}
+
+	// Get and log the headers
+	hs, err := proxywasm.GetHttpResponseHeaders()
+	if err != nil {
+		proxywasm.LogCriticalf("failed to get response headers: %v", err)
+	}
+
+	for _, h := range hs {
+		proxywasm.LogInfof("response header <-- %s: %s", h[0], h[1])
+	}
+
+	return types.ActionContinue
 }
